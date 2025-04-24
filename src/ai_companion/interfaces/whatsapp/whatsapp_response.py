@@ -8,7 +8,8 @@ from fastapi import APIRouter, Request, Response
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from ai_companion.graph import graph_builder
+# Update the import to use the Obenan graph
+from ai_companion.graph.obenan_graph import obenan_graph
 from ai_companion.modules.image import ImageToText
 from ai_companion.modules.speech import SpeechToText, TextToSpeech
 from ai_companion.settings import settings
@@ -68,7 +69,8 @@ async def whatsapp_handler(request: Request) -> Response:
 
             # Process message through the graph agent
             async with AsyncSqliteSaver.from_conn_string(settings.SHORT_TERM_MEMORY_DB_PATH) as short_term_memory:
-                graph = graph_builder.compile(checkpointer=short_term_memory)
+                # Use the Obenan graph instead of the original graph_builder
+                graph = obenan_graph.with_checkpointer(short_term_memory)
                 await graph.ainvoke(
                     {"messages": [HumanMessage(content=content)]},
                     {"configurable": {"thread_id": session_id}},
@@ -84,11 +86,15 @@ async def whatsapp_handler(request: Request) -> Response:
             if workflow == "audio":
                 audio_buffer = output_state.values["audio_buffer"]
                 success = await send_response(from_number, response_message, "audio", audio_buffer)
-            elif workflow == "image":
-                image_path = output_state.values["image_path"]
-                with open(image_path, "rb") as f:
-                    image_data = f.read()
-                success = await send_response(from_number, response_message, "image", image_data)
+            elif workflow == "image" or workflow == "vision":
+                image_path = output_state.values.get("image_path")
+                if image_path and os.path.exists(image_path):
+                    with open(image_path, "rb") as f:
+                        image_data = f.read()
+                    success = await send_response(from_number, response_message, "image", image_data)
+                else:
+                    # Fallback to text if no image is available
+                    success = await send_response(from_number, response_message, "text")
             else:
                 success = await send_response(from_number, response_message, "text")
 

@@ -4,7 +4,7 @@ import chainlit as cl
 from langchain_core.messages import AIMessageChunk, HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from ai_companion.graph import graph_builder
+from ai_companion.graph.obenan_graph import obenan_graph
 from ai_companion.modules.image import ImageToText
 from ai_companion.modules.speech import SpeechToText, TextToSpeech
 from ai_companion.settings import settings
@@ -52,13 +52,13 @@ async def on_message(message: cl.Message):
 
     async with cl.Step(type="run"):
         async with AsyncSqliteSaver.from_conn_string(settings.SHORT_TERM_MEMORY_DB_PATH) as short_term_memory:
-            graph = graph_builder.compile(checkpointer=short_term_memory)
+            graph = obenan_graph.with_checkpointer(short_term_memory)
             async for chunk in graph.astream(
                 {"messages": [HumanMessage(content=content)]},
                 {"configurable": {"thread_id": thread_id}},
                 stream_mode="messages",
             ):
-                if chunk[1]["langgraph_node"] == "conversation_node" and isinstance(chunk[0], AIMessageChunk):
+                if any(chunk[1]["langgraph_node"].startswith(f"obi") for agent in ["profile", "content", "talk", "metrics", "watch", "local", "guard", "sync", "vision", "platform"]) and isinstance(chunk[0], AIMessageChunk):
                     await msg.stream_token(chunk[0].content)
 
             output_state = await graph.aget_state(config={"configurable": {"thread_id": thread_id}})
@@ -73,10 +73,14 @@ async def on_message(message: cl.Message):
             content=audio_buffer,
         )
         await cl.Message(content=response, elements=[output_audio_el]).send()
-    elif output_state.values.get("workflow") == "image":
+    elif output_state.values.get("workflow") == "image" or output_state.values.get("workflow") == "vision":
         response = output_state.values["messages"][-1].content
-        image = cl.Image(path=output_state.values["image_path"], display="inline")
-        await cl.Message(content=response, elements=[image]).send()
+        image_path = output_state.values.get("image_path")
+        if image_path:
+            image = cl.Image(path=image_path, display="inline")
+            await cl.Message(content=response, elements=[image]).send()
+        else:
+            await msg.send()
     else:
         await msg.send()
 
@@ -110,7 +114,7 @@ async def on_audio_end(elements):
     thread_id = cl.user_session.get("thread_id")
 
     async with AsyncSqliteSaver.from_conn_string(settings.SHORT_TERM_MEMORY_DB_PATH) as short_term_memory:
-        graph = graph_builder.compile(checkpointer=short_term_memory)
+        graph = obenan_graph.with_checkpointer(short_term_memory)
         output_state = await graph.ainvoke(
             {"messages": [HumanMessage(content=transcription)]},
             {"configurable": {"thread_id": thread_id}},
