@@ -52,16 +52,22 @@ async def on_message(message: cl.Message):
 
     async with cl.Step(type="run"):
         async with AsyncSqliteSaver.from_conn_string(settings.SHORT_TERM_MEMORY_DB_PATH) as short_term_memory:
-            graph = obenan_graph.with_checkpointer(short_term_memory)
+            # Compile the graph with a checkpointer instead of using with_checkpointer
+            graph = obenan_graph.compile(checkpointer=short_term_memory)
             async for chunk in graph.astream(
                 {"messages": [HumanMessage(content=content)]},
                 {"configurable": {"thread_id": thread_id}},
                 stream_mode="messages",
             ):
-                if any(chunk[1]["langgraph_node"].startswith(f"obi") for agent in ["profile", "content", "talk", "metrics", "watch", "local", "guard", "sync", "vision", "platform"]) and isinstance(chunk[0], AIMessageChunk):
+                # Fix the condition to properly detect agent nodes
+                if isinstance(chunk[0], AIMessageChunk) and chunk[1]["langgraph_node"].startswith("obi"):
                     await msg.stream_token(chunk[0].content)
 
             output_state = await graph.aget_state(config={"configurable": {"thread_id": thread_id}})
+
+    # Debug: Log the output for troubleshooting
+    cl.logger.info(f"Workflow: {output_state.values.get('workflow')}")
+    cl.logger.info(f"Response: {output_state.values.get('messages', [])[-1].content if output_state.values.get('messages') else 'No message'}")
 
     if output_state.values.get("workflow") == "audio":
         response = output_state.values["messages"][-1].content
@@ -114,7 +120,8 @@ async def on_audio_end(elements):
     thread_id = cl.user_session.get("thread_id")
 
     async with AsyncSqliteSaver.from_conn_string(settings.SHORT_TERM_MEMORY_DB_PATH) as short_term_memory:
-        graph = obenan_graph.with_checkpointer(short_term_memory)
+        # Compile the graph with a checkpointer
+        graph = obenan_graph.compile(checkpointer=short_term_memory)
         output_state = await graph.ainvoke(
             {"messages": [HumanMessage(content=transcription)]},
             {"configurable": {"thread_id": thread_id}},

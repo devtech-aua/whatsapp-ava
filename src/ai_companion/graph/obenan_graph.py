@@ -111,5 +111,5 @@ def create_obenan_workflow_graph():
     return graph_builder
 
 
-# Compiled without a checkpointer. Used for LangGraph Studio
-obenan_graph = create_obenan_workflow_graph().compile()
+# Return the graph builder, not the compiled graph
+obenan_graph = create_obenan_workflow_graph()

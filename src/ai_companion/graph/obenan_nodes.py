@@ -33,9 +33,11 @@ def format_messages(messages):
 
 def get_advanced_llm(model_name=None):
     """Get an advanced LLM model for semantic routing."""
+    # Always set a default temperature to avoid validation errors
+    temperature = 0.7
+    
     # For now, reuse the existing chat model function
-    # In a real implementation, this could use specific models
-    return get_chat_model(model_name)
+    return get_chat_model(temperature=temperature)
 
 
 async def get_semantic_router_chain():
@@ -52,7 +54,8 @@ async def get_semantic_router_chain():
         Here are the available specialized agents:
         
         ObiProfile (OBI-001): Manages business profiles across platforms
-        - Operations: update_profile_info, update_business_hours, update_images, get_profile_details
+        - Operations: update_profile_info, update_business_hours, update_images, get_profile_details, update_location
+        - IMPORTANT: Route ANY questions about location, address changes, business location, or moving to a new place to ObiProfile with operation "update_location"
         
         ObiContent (OBI-002): Generates and optimizes business content
         - Operations: create_post, optimize_content, schedule_content, analyze_content_performance
@@ -85,8 +88,11 @@ async def get_semantic_router_chain():
         {formatted_messages}
         
         Extract the semantic intent from this conversation and determine which agent should handle it.
+        Remember that ANY questions about location, address changes, or moving should go to ObiProfile.
+        
         Respond with a structured JSON object:
         
+        ```json
         {{
             "agent": "agent_code",  // e.g., "OBI-001" for ObiProfile
             "operation": "operation_name",
@@ -95,6 +101,9 @@ async def get_semantic_router_chain():
             }},
             "human_readable_analysis": "Brief explanation of why this routing decision was made"
         }}
+        ```
+        
+        Only return this JSON object, nothing else.
         """
     )
     
@@ -309,6 +318,17 @@ async def omnipulse_router_node(state: AICompanionState):
     Central orchestration agent (OBI-000) that determines which specialized agent 
     should handle the user's request.
     """
+    # Check for direct location update keywords before any complex analysis
+    last_message = state["messages"][-1].content.lower() if state["messages"] else ""
+    if any(keyword in last_message for keyword in ["location", "address", "move", "changing address", "update address", "new location"]):
+        return {
+            "workflow": "profile",
+            "operation": "update_location",
+            "request_details": {"intent": "location_update"},
+            "routing_analysis": "User explicitly mentioned updating their location/address"
+        }
+    
+    # Continue with normal semantic analysis for other cases
     # Stage 1: Determine which agent should handle the request
     base_router = await get_semantic_router_chain()
     routing_decision = await base_router.ainvoke({"formatted_messages": format_messages(state["messages"][-5:])})
@@ -342,8 +362,36 @@ async def obiprofile_node(state: AICompanionState, config: RunnableConfig):
     memory_context = state.get("memory_context", "")
     request_details = state.get("request_details", {})
     operation = state.get("operation", "get_profile_details")
+    user_query = state.get("user_query", "")
     
-    # Create specialized prompt for profile management
+    # Check for direct location update keywords
+    location_keywords = ["location", "address", "move", "changing address", "update address", "change location", "relocate"]
+    if operation == "update_location" or any(keyword in user_query.lower() for keyword in location_keywords):
+        location_options = """[ObiProfile] I see you want to update your business location. Let me guide you through the process.
+
+Your current location is: Factory Girl
+
+To maintain accurate business information across all platforms, please select from the following location options:
+
+1. Factory Girl (current)
+2. Factory Men
+3. Downtown Café
+4. Riverside Bistro
+5. Mountain View Restaurant
+6. Ocean Breeze Eatery
+7. City Center Diner
+8. Sunset Grill
+
+After selecting a new location, I'll help you:
+• Verify the change on your business profile
+• Update any associated address information 
+• Ensure consistency across all platforms and listings
+
+Please reply with the number or name of your preferred location.
+"""
+        return {"response": location_options}
+    
+    # For other operations, use the standard prompt
     profile_prompt = PromptTemplate.from_template(
         """You are ObiProfile (OBI-001), the specialized agent for managing business profiles.
         
@@ -353,6 +401,8 @@ async def obiprofile_node(state: AICompanionState, config: RunnableConfig):
         
         Generate a response that addresses the profile management request.
         Be specific, professional, and helpful in managing the business profile information.
+        
+        IMPORTANT: Your response MUST begin with the prefix "[ObiProfile]" followed by your message.
         """
     )
     
@@ -364,7 +414,12 @@ async def obiprofile_node(state: AICompanionState, config: RunnableConfig):
         "memory_context": memory_context,
     })
     
-    return {"messages": AIMessage(content=response.content)}
+    # Add agent prefix to response if not already present
+    content = response.content
+    if not content.startswith("[ObiProfile]"):
+        content = f"[ObiProfile] {content}"
+        
+    return {"messages": AIMessage(content=content)}
 
 
 async def obicontent_node(state: AICompanionState, config: RunnableConfig):
@@ -383,6 +438,8 @@ async def obicontent_node(state: AICompanionState, config: RunnableConfig):
         
         Generate a response that addresses the content creation/optimization request.
         Be creative, engaging, and strategically focused on business goals.
+        
+        IMPORTANT: Your response MUST begin with the prefix "[ObiContent]" followed by your message.
         """
     )
     
@@ -394,7 +451,12 @@ async def obicontent_node(state: AICompanionState, config: RunnableConfig):
         "memory_context": memory_context,
     })
     
-    return {"messages": AIMessage(content=response.content)}
+    # Add agent prefix to response if not already present
+    content = response.content
+    if not content.startswith("[ObiContent]"):
+        content = f"[ObiContent] {content}"
+        
+    return {"messages": AIMessage(content=content)}
 
 
 async def obitalk_node(state: AICompanionState, config: RunnableConfig):
@@ -413,6 +475,8 @@ async def obitalk_node(state: AICompanionState, config: RunnableConfig):
         
         Generate a response that addresses the customer interaction request.
         Be empathetic, solution-oriented, and aligned with the business voice.
+        
+        IMPORTANT: Your response MUST begin with the prefix "[ObiTalk]" followed by your message.
         """
     )
     
@@ -424,7 +488,12 @@ async def obitalk_node(state: AICompanionState, config: RunnableConfig):
         "memory_context": memory_context,
     })
     
-    return {"messages": AIMessage(content=response.content)}
+    # Add agent prefix to response if not already present
+    content = response.content
+    if not content.startswith("[ObiTalk]"):
+        content = f"[ObiTalk] {content}"
+        
+    return {"messages": AIMessage(content=content)}
 
 
 async def obimetrics_node(state: AICompanionState, config: RunnableConfig):
@@ -443,6 +512,8 @@ async def obimetrics_node(state: AICompanionState, config: RunnableConfig):
         
         Generate a response that addresses the metrics and analytics request.
         Be data-driven, insightful, and focused on actionable business intelligence.
+        
+        IMPORTANT: Your response MUST begin with the prefix "[ObiMetrics]" followed by your message.
         """
     )
     
@@ -454,7 +525,12 @@ async def obimetrics_node(state: AICompanionState, config: RunnableConfig):
         "memory_context": memory_context,
     })
     
-    return {"messages": AIMessage(content=response.content)}
+    # Add agent prefix to response if not already present
+    content = response.content
+    if not content.startswith("[ObiMetrics]"):
+        content = f"[ObiMetrics] {content}"
+        
+    return {"messages": AIMessage(content=content)}
 
 
 async def obiwatch_node(state: AICompanionState, config: RunnableConfig):
@@ -473,6 +549,8 @@ async def obiwatch_node(state: AICompanionState, config: RunnableConfig):
         
         Generate a response that addresses the competitor analysis request.
         Be strategic, detailed, and focused on competitive advantage opportunities.
+        
+        IMPORTANT: Your response MUST begin with the prefix "[ObiWatch]" followed by your message.
         """
     )
     
@@ -484,7 +562,12 @@ async def obiwatch_node(state: AICompanionState, config: RunnableConfig):
         "memory_context": memory_context,
     })
     
-    return {"messages": AIMessage(content=response.content)}
+    # Add agent prefix to response if not already present
+    content = response.content
+    if not content.startswith("[ObiWatch]"):
+        content = f"[ObiWatch] {content}"
+        
+    return {"messages": AIMessage(content=content)}
 
 
 async def obilocal_node(state: AICompanionState, config: RunnableConfig):
@@ -503,6 +586,8 @@ async def obilocal_node(state: AICompanionState, config: RunnableConfig):
         
         Generate a response that addresses the local market intelligence request.
         Be geographically specific, trend-aware, and focused on local opportunities.
+        
+        IMPORTANT: Your response MUST begin with the prefix "[ObiLocal]" followed by your message.
         """
     )
     
@@ -514,7 +599,12 @@ async def obilocal_node(state: AICompanionState, config: RunnableConfig):
         "memory_context": memory_context,
     })
     
-    return {"messages": AIMessage(content=response.content)}
+    # Add agent prefix to response if not already present
+    content = response.content
+    if not content.startswith("[ObiLocal]"):
+        content = f"[ObiLocal] {content}"
+        
+    return {"messages": AIMessage(content=content)}
 
 
 async def obiguard_node(state: AICompanionState, config: RunnableConfig):
@@ -533,6 +623,8 @@ async def obiguard_node(state: AICompanionState, config: RunnableConfig):
         
         Generate a response that addresses the compliance and moderation request.
         Be precise, regulatory-aware, and focused on risk mitigation.
+        
+        IMPORTANT: Your response MUST begin with the prefix "[ObiGuard]" followed by your message.
         """
     )
     
@@ -544,7 +636,12 @@ async def obiguard_node(state: AICompanionState, config: RunnableConfig):
         "memory_context": memory_context,
     })
     
-    return {"messages": AIMessage(content=response.content)}
+    # Add agent prefix to response if not already present
+    content = response.content
+    if not content.startswith("[ObiGuard]"):
+        content = f"[ObiGuard] {content}"
+        
+    return {"messages": AIMessage(content=content)}
 
 
 async def obisync_node(state: AICompanionState, config: RunnableConfig):
@@ -563,6 +660,8 @@ async def obisync_node(state: AICompanionState, config: RunnableConfig):
         
         Generate a response that addresses the platform integration request.
         Be technical, solution-oriented, and focused on seamless data flow.
+        
+        IMPORTANT: Your response MUST begin with the prefix "[ObiSync]" followed by your message.
         """
     )
     
@@ -574,7 +673,12 @@ async def obisync_node(state: AICompanionState, config: RunnableConfig):
         "memory_context": memory_context,
     })
     
-    return {"messages": AIMessage(content=response.content)}
+    # Add agent prefix to response if not already present
+    content = response.content
+    if not content.startswith("[ObiSync]"):
+        content = f"[ObiSync] {content}"
+        
+    return {"messages": AIMessage(content=content)}
 
 
 async def obivision_node(state: AICompanionState, config: RunnableConfig):
@@ -593,6 +697,8 @@ async def obivision_node(state: AICompanionState, config: RunnableConfig):
         
         Generate a response that addresses the visual content analysis request.
         Be detail-oriented, perceptive, and focused on extracting meaningful insights.
+        
+        IMPORTANT: Your response MUST begin with the prefix "[ObiVision]" followed by your message.
         """
     )
     
@@ -604,7 +710,12 @@ async def obivision_node(state: AICompanionState, config: RunnableConfig):
         "memory_context": memory_context,
     })
     
-    return {"messages": AIMessage(content=response.content)}
+    # Add agent prefix to response if not already present
+    content = response.content
+    if not content.startswith("[ObiVision]"):
+        content = f"[ObiVision] {content}"
+        
+    return {"messages": AIMessage(content=content)}
 
 
 async def obiplatform_node(state: AICompanionState, config: RunnableConfig):
@@ -623,6 +734,8 @@ async def obiplatform_node(state: AICompanionState, config: RunnableConfig):
         
         Generate a response that addresses the platform service request.
         Be system-oriented, efficient, and focused on user experience.
+        
+        IMPORTANT: Your response MUST begin with the prefix "[ObiPlatform]" followed by your message.
         """
     )
     
@@ -634,4 +747,9 @@ async def obiplatform_node(state: AICompanionState, config: RunnableConfig):
         "memory_context": memory_context,
     })
     
-    return {"messages": AIMessage(content=response.content)}
+    # Add agent prefix to response if not already present
+    content = response.content
+    if not content.startswith("[ObiPlatform]"):
+        content = f"[ObiPlatform] {content}"
+        
+    return {"messages": AIMessage(content=content)}

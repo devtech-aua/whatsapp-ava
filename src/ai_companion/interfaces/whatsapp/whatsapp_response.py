@@ -69,8 +69,8 @@ async def whatsapp_handler(request: Request) -> Response:
 
             # Process message through the graph agent
             async with AsyncSqliteSaver.from_conn_string(settings.SHORT_TERM_MEMORY_DB_PATH) as short_term_memory:
-                # Use the Obenan graph instead of the original graph_builder
-                graph = obenan_graph.with_checkpointer(short_term_memory)
+                # Compile the graph with a checkpointer instead of using with_checkpointer
+                graph = obenan_graph.compile(checkpointer=short_term_memory)
                 await graph.ainvoke(
                     {"messages": [HumanMessage(content=content)]},
                     {"configurable": {"thread_id": session_id}},
