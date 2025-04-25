@@ -25,6 +25,10 @@ image_to_text = ImageToText()
 whatsapp_router = APIRouter()
 
 # WhatsApp API credentials
+print("Handles incoming messages and status updates from the WhatsApp Cloud API.")
+print(os.environ.get("WHATSAPP_TOKEN"))
+print(os.environ.get("WHATSAPP_PHONE_NUMBER_ID"))
+print("---Handles incoming messages and status updates from the WhatsApp Cloud API.---")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 
@@ -32,86 +36,92 @@ WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 @whatsapp_router.api_route("/whatsapp_response", methods=["GET", "POST"])
 async def whatsapp_handler(request: Request) -> Response:
     """Handles incoming messages and status updates from the WhatsApp Cloud API."""
-
+    print("Handles incoming messages and status updates from the WhatsApp Cloud API.")
+    print(WHATSAPP_TOKEN)
+    print(WHATSAPP_PHONE_NUMBER_ID)
+    print("---HHHHHandles incoming messages and status updates from the WhatsApp Cloud API.---")
+    print( request.method)
+    
     if request.method == "GET":
         params = request.query_params
         if params.get("hub.verify_token") == os.getenv("WHATSAPP_VERIFY_TOKEN"):
             return Response(content=params.get("hub.challenge"), status_code=200)
         return Response(content="Verification token mismatch", status_code=403)
 
-    try:
-        data = await request.json()
-        change_value = data["entry"][0]["changes"][0]["value"]
-        if "messages" in change_value:
-            message = change_value["messages"][0]
-            from_number = message["from"]
-            session_id = from_number
+    if request.method == "POST":
+        try:
+            data = await request.json()
+            change_value = data["entry"][0]["changes"][0]["value"]
+            if "messages" in change_value:
+                message = change_value["messages"][0]
+                from_number = message["from"]
+                session_id = from_number
 
-            # Get user message and handle different message types
-            content = ""
-            if message["type"] == "audio":
-                content = await process_audio_message(message)
-            elif message["type"] == "image":
-                # Get image caption if any
-                content = message.get("image", {}).get("caption", "")
-                # Download and analyze image
-                image_bytes = await download_media(message["image"]["id"])
-                try:
-                    description = await image_to_text.analyze_image(
-                        image_bytes,
-                        "Please describe what you see in this image in the context of our conversation.",
-                    )
-                    content += f"\n[Image Analysis: {description}]"
-                except Exception as e:
-                    logger.warning(f"Failed to analyze image: {e}")
-            else:
-                content = message["text"]["body"]
-
-            # Process message through the graph agent
-            async with AsyncSqliteSaver.from_conn_string(settings.SHORT_TERM_MEMORY_DB_PATH) as short_term_memory:
-                # Compile the graph with a checkpointer instead of using with_checkpointer
-                graph = obenan_graph.compile(checkpointer=short_term_memory)
-                await graph.ainvoke(
-                    {"messages": [HumanMessage(content=content)]},
-                    {"configurable": {"thread_id": session_id}},
-                )
-
-                # Get the workflow type and response from the state
-                output_state = await graph.aget_state(config={"configurable": {"thread_id": session_id}})
-
-            workflow = output_state.values.get("workflow", "conversation")
-            response_message = output_state.values["messages"][-1].content
-
-            # Handle different response types based on workflow
-            if workflow == "audio":
-                audio_buffer = output_state.values["audio_buffer"]
-                success = await send_response(from_number, response_message, "audio", audio_buffer)
-            elif workflow == "image" or workflow == "vision":
-                image_path = output_state.values.get("image_path")
-                if image_path and os.path.exists(image_path):
-                    with open(image_path, "rb") as f:
-                        image_data = f.read()
-                    success = await send_response(from_number, response_message, "image", image_data)
+                # Get user message and handle different message types
+                content = ""
+                if message["type"] == "audio":
+                    content = await process_audio_message(message)
+                elif message["type"] == "image":
+                    # Get image caption if any
+                    content = message.get("image", {}).get("caption", "")
+                    # Download and analyze image
+                    image_bytes = await download_media(message["image"]["id"])
+                    try:
+                        description = await image_to_text.analyze_image(
+                            image_bytes,
+                            "Please describe what you see in this image in the context of our conversation.",
+                        )
+                        content += f"\n[Image Analysis: {description}]"
+                    except Exception as e:
+                        logger.warning(f"Failed to analyze image: {e}")
                 else:
-                    # Fallback to text if no image is available
+                    content = message["text"]["body"]
+
+                # Process message through the graph agent
+                async with AsyncSqliteSaver.from_conn_string(settings.SHORT_TERM_MEMORY_DB_PATH) as short_term_memory:
+                    # Compile the graph with a checkpointer instead of using with_checkpointer
+                    graph = obenan_graph.compile(checkpointer=short_term_memory)
+                    await graph.ainvoke(
+                        {"messages": [HumanMessage(content=content)]},
+                        {"configurable": {"thread_id": session_id}},
+                    )
+
+                    # Get the workflow type and response from the state
+                    output_state = await graph.aget_state(config={"configurable": {"thread_id": session_id}})
+
+                workflow = output_state.values.get("workflow", "conversation")
+                response_message = output_state.values["messages"][-1].content
+
+                # Handle different response types based on workflow
+                if workflow == "audio":
+                    audio_buffer = output_state.values["audio_buffer"]
+                    success = await send_response(from_number, response_message, "audio", audio_buffer)
+                elif workflow == "image" or workflow == "vision":
+                    image_path = output_state.values.get("image_path")
+                    if image_path and os.path.exists(image_path):
+                        with open(image_path, "rb") as f:
+                            image_data = f.read()
+                        success = await send_response(from_number, response_message, "image", image_data)
+                    else:
+                        # Fallback to text if no image is available
+                        success = await send_response(from_number, response_message, "text")
+                else:
                     success = await send_response(from_number, response_message, "text")
+
+                if not success:
+                    return Response(content="Failed to send message", status_code=500)
+
+                return Response(content="Message processed", status_code=200)
+
+            elif "statuses" in change_value:
+                return Response(content="Status update received", status_code=200)
+
             else:
-                success = await send_response(from_number, response_message, "text")
+                return Response(content="Unknown event type", status_code=400)
 
-            if not success:
-                return Response(content="Failed to send message", status_code=500)
-
-            return Response(content="Message processed", status_code=200)
-
-        elif "statuses" in change_value:
-            return Response(content="Status update received", status_code=200)
-
-        else:
-            return Response(content="Unknown event type", status_code=400)
-
-    except Exception as e:
-        logger.error(f"Error processing message: {e}", exc_info=True)
-        return Response(content="Internal server error", status_code=500)
+        except Exception as e:
+            logger.error(f"Error processing message: {e}", exc_info=True)
+            return Response(content="Internal server error", status_code=500)
 
 
 async def download_media(media_id: str) -> bytes:
@@ -167,6 +177,15 @@ async def send_response(
         "Content-Type": "application/json",
     }
 
+    # Debug prints for troubleshooting
+    print("[send_response] Sending response to WhatsApp...")
+    print("Headers:", headers)
+    print("From number:", from_number)
+    print("Message type:", message_type)
+    print("Response text:", response_text)
+    print("Phone number ID:", WHATSAPP_PHONE_NUMBER_ID)
+    print("POST URL:", f"https://graph.facebook.com/v21.0/{WHATSAPP_PHONE_NUMBER_ID}/messages")
+
     if message_type in ["audio", "image"]:
         try:
             mime_type = "audio/mpeg" if message_type == "audio" else "image/png"
@@ -178,12 +197,10 @@ async def send_response(
                 "type": message_type,
                 message_type: {"id": media_id},
             }
-
-            # Add caption for images
             if message_type == "image":
                 json_data["image"]["caption"] = response_text
         except Exception as e:
-            logger.error(f"Media upload failed, falling back to text: {e}")
+            print("[send_response] Failed to upload media:", e)
             message_type = "text"
 
     if message_type == "text":
@@ -194,8 +211,7 @@ async def send_response(
             "text": {"body": response_text},
         }
 
-    print(headers)
-    print(json_data)
+    print("Payload:", json_data)
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -203,6 +219,8 @@ async def send_response(
             headers=headers,
             json=json_data,
         )
+        print("[send_response] WhatsApp API status:", response.status_code)
+        print("[send_response] WhatsApp API response:", response.text)
 
     return response.status_code == 200
 
