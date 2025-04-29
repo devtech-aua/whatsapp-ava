@@ -7,6 +7,9 @@ import json
 from uuid import uuid4
 import os
 
+# Simple in-memory store for login data
+LOGIN_STORE = {}  # Key: user_id, Value: {email, password, token, user}
+
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.prompts import PromptTemplate
@@ -83,6 +86,9 @@ async def get_semantic_router_chain():
         
         ObiPlatform (OBI-010): Provides core platform services
         - Operations: manage_users, configure_settings, handle_notifications, process_requests
+        
+        ObiLogin (OBI-011): Handles user login
+        - Operations: login
         
         User message history:
         {formatted_messages}
@@ -289,6 +295,20 @@ def get_agent_specific_extractor(agent_code):
             Return a detailed JSON structure with all platform service parameters found.
             """
         ),
+        "OBI-011": PromptTemplate.from_template(
+            """Extract login details from the conversation.
+            Focus on:
+            - Email address (look for typical email format, e.g. user@domain.com)
+            - Password (look for short strings after 'password' or if a user message is likely a password)
+            
+            Conversation:
+            {messages}
+            
+            Operation: {operation}
+            
+            Return a detailed JSON structure with keys "email" and "password" if found, e.g. {{\"email\": \"user@email.com\", \"password\": \"secret\"}}. If not found, return an empty string for missing fields.
+            """
+        ),
     }
     
     llm = get_advanced_llm()
@@ -308,7 +328,8 @@ def agent_code_to_workflow(agent_code):
         "OBI-007": "guard",
         "OBI-008": "sync",
         "OBI-009": "vision",
-        "OBI-010": "platform"
+        "OBI-010": "platform",
+        "OBI-011": "login"
     }
     return mapping.get(agent_code, "talk")
 
@@ -341,16 +362,28 @@ async def omnipulse_router_node(state: AICompanionState):
     parameter_extractor = get_agent_specific_extractor(agent_code)
     
     # Extract detailed parameters for the specific agent/operation
-    detailed_parameters = await parameter_extractor.ainvoke({
+    extracted_parameters = await parameter_extractor.ainvoke({
         "messages": format_messages(state["messages"][-5:]),
         "operation": operation,
         "base_parameters": routing_decision["parameters"]
     })
     
+    # Merge extracted parameters with existing request_details for incremental login
+    prev_details = state.get("request_details", {})
+    merged_details = prev_details.copy() if isinstance(prev_details, dict) else {}
+    if isinstance(extracted_parameters, dict):
+        for k, v in extracted_parameters.items():
+            if v:
+                merged_details[k] = v
+    # Always ensure both keys exist for login
+    if agent_code == "OBI-011":
+        merged_details.setdefault("email", "")
+        merged_details.setdefault("password", "")
+
     return {
         "workflow": agent_code_to_workflow(agent_code),
         "operation": operation,
-        "request_details": detailed_parameters,
+        "request_details": merged_details,
         "routing_analysis": routing_decision["human_readable_analysis"]
     }
 
@@ -363,62 +396,20 @@ async def obiprofile_node(state: AICompanionState, config: RunnableConfig):
     request_details = state.get("request_details", {})
     operation = state.get("operation", "get_profile_details")
     user_query = state.get("user_query", "")
-    
-    # Check for direct location update keywords
-    location_keywords = ["location", "address", "move", "changing address", "update address", "change location", "relocate"]
-    if operation == "update_location" or any(keyword in user_query.lower() for keyword in location_keywords):
-        location_options = """[ObiProfile] I see you want to update your business location. Let me guide you through the process.
 
-Your current location is: Factory Girl
+    # Ask for username if not provided
+    if not request_details.get("username"):
+        return {"messages": AIMessage(content="[ObiProfile] Please provide your username to proceed with profile management.")}
 
-To maintain accurate business information across all platforms, please select from the following location options:
-
-1. Factory Girl (current)
-2. Factory Men
-3. Downtown Café
-4. Riverside Bistro
-5. Mountain View Restaurant
-6. Ocean Breeze Eatery
-7. City Center Diner
-8. Sunset Grill
-
-After selecting a new location, I'll help you:
-• Verify the change on your business profile
-• Update any associated address information 
-• Ensure consistency across all platforms and listings
-
-Please reply with the number or name of your preferred location.
-"""
-        return {"response": location_options}
-    
-    # For other operations, use the standard prompt
-    profile_prompt = PromptTemplate.from_template(
-        """You are ObiProfile (OBI-001), the specialized agent for managing business profiles.
-        
-        Current operation: {operation}
-        Request details: {request_details}
-        Memory context: {memory_context}
-        
-        Generate a response that addresses the profile management request.
-        Be specific, professional, and helpful in managing the business profile information.
-        
-        IMPORTANT: Your response MUST begin with the prefix "[ObiProfile]" followed by your message.
-        """
-    )
-    
-    # Get response from LLM
-    llm = get_advanced_llm()
-    response = await (profile_prompt | llm).ainvoke({
-        "operation": operation,
-        "request_details": json.dumps(request_details, indent=2),
-        "memory_context": memory_context,
-    })
-    
-    # Add agent prefix to response if not already present
-    content = response.content
-    if not content.startswith("[ObiProfile]"):
-        content = f"[ObiProfile] {content}"
-        
+    # Call external API to get profile data (pseudo-code, replace with actual API call)
+    import httpx
+    try:
+        api_response = httpx.get(f"https://your-api.com/profile?username={request_details['username']}")
+        api_response.raise_for_status()
+        profile_data = api_response.json()
+        content = f"[ObiProfile] Profile for {request_details['username']}: {profile_data}"
+    except Exception as e:
+        content = f"[ObiProfile] Failed to fetch profile for {request_details['username']}: {str(e)}"
     return {"messages": AIMessage(content=content)}
 
 
@@ -753,3 +744,142 @@ async def obiplatform_node(state: AICompanionState, config: RunnableConfig):
         content = f"[ObiPlatform] {content}"
         
     return {"messages": AIMessage(content=content)}
+
+
+async def obilogin_node(state: AICompanionState, config: RunnableConfig):
+    """OBI-011: Handles user login using the Obenan API."""
+    # Get user ID from config (this is unique to this conversation)
+    user_id = config.get('configurable', {}).get('thread_id')
+    print(f"\n\n*** OBILOGIN NODE for user {user_id} ***")
+    
+    # Get login info from persistent store
+    login_info = LOGIN_STORE.get(user_id, {})
+    print(f"Stored login info: {login_info}")
+    
+    # Check for login reset keyword
+    last_message = state["messages"][-1].content.lower() if state["messages"] else ""
+    print(f"Last message: {last_message}")
+    
+    # Reset login flow if the message is "login"
+    if last_message.strip() == "login":
+        # Clear any previous login information
+        login_info = {}
+        LOGIN_STORE[user_id] = login_info
+        print("Login flow reset detected")
+        return {"messages": AIMessage(content="[ObLogin] Please provide your email address to log in."), 
+                "request_details": login_info}
+     
+    # Check if this is a logout request
+    if "logout" in last_message or "sign out" in last_message:
+        # Clear login info
+        if user_id in LOGIN_STORE:
+            del LOGIN_STORE[user_id]
+        print("User logged out")
+        return {"messages": AIMessage(content="[ObLogin] You have been logged out successfully. Please provide your email to login again."), 
+                "request_details": {}}
+     
+    # Extract email from message using regex
+    import re
+    email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', last_message)
+    if email_match:
+        login_info["email"] = email_match.group(0)
+        print(f"Found email: {login_info['email']}")
+     
+    # Extract password if message looks like a password (short text without @)
+    # Only if we already have an email and no password yet
+    if not email_match and "email" in login_info and "password" not in login_info:
+        possible_password = last_message.strip()
+        # Don't use "login" as a password - it's likely a command
+        if possible_password and len(possible_password) >= 4 and possible_password.lower() != "login":
+            login_info["password"] = possible_password
+            print(f"Found password: {possible_password}")
+     
+    # Get email and password from request details
+    email = login_info.get("email")
+    password = login_info.get("password")
+    print(f"Email: {email}, Password: {'*' * len(password) if password else None}")
+     
+    # Update the store immediately
+    LOGIN_STORE[user_id] = login_info
+    
+    # Handle login flow steps
+    if not email:
+        print("No email found, asking for email")
+        return {"messages": AIMessage(content="[ObLogin] Please provide your email address to log in."), 
+                "request_details": login_info}
+     
+    if not password:
+        print("No password found, asking for password")
+        return {"messages": AIMessage(content=f"[ObLogin] Email received: {email}. Please provide your password to complete login."), 
+                "request_details": login_info}
+     
+    import httpx
+    try:
+        print(f"Making API call with email: {email} and password")
+        
+        # Add proper headers for the API request
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
+        # Improved request with headers and better error handling
+        resp = httpx.post(
+            "https://betaapi.obenan.com/api/v1/user/login",
+            json={"email": email, "password": password},
+            headers=headers,
+            timeout=20
+        )
+        
+        # Print response details for debugging
+        print(f"Response status: {resp.status_code}")
+        print(f"Response headers: {resp.headers}")
+        
+        resp.raise_for_status()
+        data = resp.json()
+        token = data.get("token")
+        user = data.get("user", {})
+        # Store login info
+        login_info["token"] = token
+        login_info["user"] = user
+        login_info["logged_in"] = True
+        print("Login successful!")
+        
+        # Update both stores
+        LOGIN_STORE[user_id] = login_info
+        # Force state update
+        state["request_details"] = login_info
+        
+        return {"messages": AIMessage(content=f"[ObLogin] Login successful!\nToken: {token}\nUser: {user}"), 
+                "request_details": login_info}
+    except httpx.HTTPStatusError as e:
+        # Handle HTTP status errors specifically
+        error_msg = f"HTTP Error {e.response.status_code}: {e.response.reason_phrase}"
+        print(f"Login failed: {error_msg}")
+        print(f"Response content: {e.response.text}")
+        
+        # Clear password but keep email on error
+        login_info["password"] = ""
+        
+        return {"messages": AIMessage(content=f"[ObLogin] Login failed: {error_msg}.\nPlease try again with 'login'."),
+                "request_details": login_info}
+    except httpx.RequestError as e:
+        # Network-related errors (DNS failure, connection refused, etc.)
+        error_msg = f"Request Error: {str(e)}"
+        print(f"Login failed: {error_msg}")
+        
+        # Clear password but keep email on error
+        login_info["password"] = ""
+        
+        return {"messages": AIMessage(content=f"[ObLogin] Login failed: {error_msg}.\nPlease try again with 'login'."),
+                "request_details": login_info}
+    except Exception as e:        
+        # General exception handling for other types of errors
+        error_msg = str(e) if str(e) else f"Unknown error: {type(e).__name__}"
+        print(f"Login failed: {error_msg}")
+        
+        # Clear password but keep email on error
+        login_info["password"] = ""
+        
+        return {"messages": AIMessage(content=f"[ObLogin] Login failed: {error_msg}.\nPlease try again with 'login'."),
+                "request_details": login_info}
